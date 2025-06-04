@@ -3,7 +3,7 @@
 # Makefile for octadiskhistymg 
 
 CC = gcc
-CFLAGS = -O2 -Wall -std=c99
+CFLAGS = -O2 -Wall 
 TARGET = octadiskhistymg
 
 .PHONY: all clean

@@ -1,7 +1,7 @@
 //
 // Made by M.AKIMOTO
 // 2025/05/26
-// gcc -O2 -Wall -std=c99 -o octadiskhistymg octadiskhistymg.c
+// gcc -O2 -Wall -o octadiskhistymg octadiskhistymg.c
 //
 
 #include <stdio.h>
