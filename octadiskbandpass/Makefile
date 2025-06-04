@@ -3,7 +3,7 @@
 # Makefile for octadiskbandpass
 
 CC = gcc
-CFLAGS = -O2 -Wall -std=c99 -fopenmp 
+CFLAGS = -O2 -Wall -fopenmp 
 TARGET = octadiskbandpass
 
 .PHONY: all clean

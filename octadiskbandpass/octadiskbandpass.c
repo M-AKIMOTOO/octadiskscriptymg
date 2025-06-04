@@ -2,7 +2,7 @@
 // M.AKIMOTO
 // Modified by ChatGPT based on user request
 // 2025/05/27 
-// gcc -O2 -Wall -std=c99 -fopenmp -o octadiskbandpass octadiskbandpass.c -lfftw3f -lm 
+// gcc -O2 -Wall -fopenmp -o octadiskbandpass octadiskbandpass.c -lfftw3f -lm 
 //
 
 #include <stdio.h>
