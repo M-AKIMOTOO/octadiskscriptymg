@@ -3,7 +3,7 @@
 # Makefile for octadiskbandpass
 
 CC = gcc
-CFLAGS = -O2 -Wall -fopenmp 
+CFLAGS = -O2 -Wall
 TARGET = octadiskbandpass
 
 .PHONY: all clean
@@ -11,7 +11,7 @@ TARGET = octadiskbandpass
 all: $(TARGET)
 
 $(TARGET): $(TARGET).c
-	$(CC) $(CFLAGS) -o $(TARGET) $(TARGET).c -lfftw3f -lm 
+	$(CC) $(CFLAGS) -o $(TARGET) $(TARGET).c -lfftw3 -lm 
 
 install:
 	cp $(TARGET) ~/bin

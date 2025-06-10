@@ -1,158 +1,149 @@
 //
 // M.AKIMOTO
-// Modified by ChatGPT based on user request
-// 2025/05/27 
-// gcc -O2 -Wall -fopenmp -o octadiskbandpass octadiskbandpass.c -lfftw3f -lm 
-//
+// 2025/06/10
+// gcc -O2 -Wall -o octadiskbandpass octadiskbandpass.c -lfftw3 -lm
+// 
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <string.h>
-#include <math.h>
-#include <omp.h>
 #include <fftw3.h>
-#include <unistd.h>
+#include <math.h>
+#include <string.h>
 
-#define BASE_RATE_MB 256
-#define BASE_RATE_BYTES (BASE_RATE_MB * 1024 * 1024)
-#define MAX_PATH 1024
-#define BANDWIDTH_MHZ 511.0f
+#define BANDWIDTH (512e6) // 512 MHz
 
-void print_usage(const char* prog) {
-    printf("Usage: %s file.vdif fft_length integration_time [--recorder octadisk|vsrec] [--cpu N]\n", prog);
-    printf("  file.vdif           : Input VDIF file\n");
-    printf("  fft_length          : FFT length (power of 2)\n");
-    printf("  integration_time    : Integration time in seconds (can be fractional)\n");
-    printf("  --recorder          : Optional, 'octadisk' (default) or 'vsrec'\n");
-    printf("  --cpu               : Optional, number of CPU threads (default=3)\n");
+int8_t decode_2bit(uint8_t data, int shift) {
+    uint8_t val = (data >> shift) & 0x03;
+    switch (val) {
+        case 0: return -3;
+        case 1: return -1;
+        case 2: return 1;
+        case 3: return 3;
+        default: return 0; 
+    }
 }
 
-int main(int argc, char* argv[]) {
-    if (argc < 4) {
-        print_usage(argv[0]);
-        return 1;
+int main(int argc, char *argv[]) {
+    if (argc < 4 || argc > 5) {
+        fprintf(stderr, "Usage: %s <vdif_file> <fft_points> <integration_time_sec> [moving_avg_points]\n", argv[0]);
+        return EXIT_FAILURE;
     }
 
-    const char* filename = argv[1];
-    int fft_len = atoi(argv[2]);
-    float integration_time = atof(argv[3]);
-    int recorder_type = 0;
-    int cpu_threads = 3;
+    char *filename = argv[1];
+    int fft_points = atoi(argv[2]);
+    int integration_time = atoi(argv[3]);
+    int moving_avg_points = (argc == 5) ? atoi(argv[4]) : 32;
 
-    for (int i = 4; i < argc; ++i) {
-        if (strcmp(argv[i], "--recorder") == 0 && i + 1 < argc) {
-            recorder_type = (strcmp(argv[++i], "vsrec") == 0) ? 1 : 0;
-        } else if (strcmp(argv[i], "--cpu") == 0 && i + 1 < argc) {
-            cpu_threads = atoi(argv[++i]);
+    // ファイル名準備
+    char pngfile[256], scriptfile[256], specfile[256], avgfile[256];
+    snprintf(pngfile, sizeof(pngfile),   "%s.png", filename);
+    snprintf(scriptfile, sizeof(scriptfile), "%s.gplt", filename);
+    snprintf(specfile, sizeof(specfile), "%s.spec.dat", filename);
+    snprintf(avgfile, sizeof(avgfile), "%s.avg.dat", filename);
+
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) {
+        perror("Failed to open file");
+        return EXIT_FAILURE;
+    }
+
+    size_t samples_per_sec = (size_t)BANDWIDTH * 2; // 2bit/sample
+    size_t bytes_per_fft = fft_points / 4;
+    size_t total_ffts = samples_per_sec / fft_points * integration_time;
+
+    uint8_t *buffer = malloc(bytes_per_fft);
+    double *input = fftw_malloc(sizeof(double) * fft_points);
+    fftw_complex *output = fftw_malloc(sizeof(fftw_complex) * (fft_points/2+1));
+    double *spectrum = calloc(fft_points/2+1, sizeof(double));
+
+    fftw_plan plan = fftw_plan_dft_r2c_1d(fft_points, input, output, FFTW_MEASURE);
+
+    for (size_t fft_count = 0; fft_count < total_ffts; fft_count++) {
+        if (fread(buffer, 1, bytes_per_fft, fp) != bytes_per_fft) {
+            fprintf(stderr, "Unexpected end of file\n");
+            break;
         }
-    }
 
-    FILE* f = fopen(filename, "rb");
-    if (!f) {
-        perror("Error opening file");
-        return 1;
-    }
-
-    char datname[MAX_PATH];
-    snprintf(datname, sizeof(datname), "%s.dat", filename);
-    FILE* fout = fopen(datname, "w");
-    if (!fout) {
-        perror("Error opening output .dat file");
-        fclose(f);
-        return 1;
-    }
-
-    omp_set_num_threads(cpu_threads);
-    size_t seconds = (size_t)integration_time;
-    float frac = integration_time - seconds;
-
-    size_t full_sec_bytes = BASE_RATE_BYTES;
-    size_t frac_bytes = (size_t)(BASE_RATE_BYTES * frac);
-    size_t total_bytes = seconds * full_sec_bytes + frac_bytes;
-    size_t max_symbols = total_bytes * 4;
-    size_t num_ffts = max_symbols / fft_len;
-
-    float* power_spectrum = calloc(fft_len / 2, sizeof(float));
-    if (!power_spectrum) {
-        perror("calloc failed");
-        fclose(f);
-        fclose(fout);
-        return 1;
-    }
-
-    float* in = fftwf_alloc_real(fft_len);
-    float* out = fftwf_alloc_real(fft_len);
-    fftwf_plan plan = fftwf_plan_r2r_1d(fft_len, in, out, FFTW_R2HC, FFTW_MEASURE);
-
-    size_t done_ffts = 0;
-    uint32_t* wordbuf = malloc(BASE_RATE_BYTES);
-    if (!wordbuf) {
-        perror("malloc wordbuf failed");
-        return 1;
-    }
-
-    for (size_t sec = 0; sec < (size_t)ceil(integration_time); ++sec) {
-        size_t to_read = (sec == seconds) ? frac_bytes : full_sec_bytes;
-        size_t read_words = to_read / 4;
-        size_t r = fread(wordbuf, 1, read_words, f);
-        if (r != read_words) break;
-
-        uint8_t* symbols = malloc(read_words * 16);
-        #pragma omp parallel for
-        for (size_t i = 0; i < read_words; i++) {
-            for (int j = 0; j < 16; j++) {
-                symbols[i * 16 + j] = (wordbuf[i] >> (2 * j)) & 0x3;
+        double sum = 0.0;
+        for (size_t i = 0, samp_idx = 0; i < bytes_per_fft; i++) {
+            for (int shift = 6; shift >= 0; shift -= 2) {
+                input[samp_idx] = decode_2bit(buffer[i], shift);
+                sum += input[samp_idx];
+                samp_idx++;
             }
         }
 
-        size_t sympos = 0;
-        while (sympos + fft_len <= read_words * 16 && done_ffts < num_ffts) {
-            for (int i = 0; i < fft_len; ++i) in[i] = (float)(symbols[sympos + i]);
-            fftwf_execute(plan);
-            out[0] = 0.0f;
-            #pragma omp parallel for
-            for (int i = 0; i < fft_len / 2; ++i) {
-   
-                power_spectrum[i] += out[i] * out[i];
-            }
-            sympos += fft_len;
-            ++done_ffts;
+        double mean = sum / fft_points;
+        for (int i = 0; i < fft_points; i++)
+            input[i] -= mean;
+
+        input[0] = 0;
+        fftw_execute(plan);
+        
+ 
+
+        for (int i = 0; i < fft_points / 2; i++)
+            spectrum[i] += output[i][0]*output[i][0] + output[i][1]*output[i][1];
+    }
+
+    for (int i = 0; i < fft_points / 2; i++)
+        spectrum[i] /= (total_ffts * fft_points);
+
+    // スペクトルデータ保存
+    FILE *fspec = fopen(specfile, "w");
+    FILE *favg  = fopen(avgfile, "w");
+    double freq_res = BANDWIDTH / (fft_points / 2);
+    int i = 0;
+    int j = 0;
+
+    for (i = 1; i < fft_points / 2; i++)
+        fprintf(fspec, "%.10f %.10f\n", i * freq_res/1e6, spectrum[i]);
+
+    for (i = 1; i < (fft_points / 2) - moving_avg_points; i++) {
+        double avg1 = 0.0;
+        double avg2 = 0.0;
+        for (j = 0; j < moving_avg_points; j++) {
+            avg1 += ((i+j) * freq_res/1e6);
+            avg2 += spectrum[i + j];
         }
-        free(symbols);
+        avg1 /= moving_avg_points;
+        avg2 /= moving_avg_points;
+        fprintf(favg, "%.10f %.10f\n", avg1, avg2);
     }
+    fclose(fspec);
+    fclose(favg);
 
-    float freq_res = BANDWIDTH_MHZ / (fft_len / 2.0);
-    for (int i = 0; i < (fft_len / 2); ++i) {
-        int j = (fft_len / 2) - 1 - i;  // スペクトル反転
-        float freq = i * freq_res;
-        fprintf(fout, "%f\t%f\n", freq, power_spectrum[j] / done_ffts);
-    }
-    fclose(fout);
+    // gnuplotスクリプト書き出し
+    FILE *gpf = fopen(scriptfile, "w");
+    fprintf(gpf, "set xlabel 'Frequency [MHz]'\n");
+    fprintf(gpf, "set ylabel 'Power'\n");
+    fprintf(gpf, "set xrange [0:%f]\n", BANDWIDTH/1e6);
+    fprintf(gpf, "set title 'Spectrum (%s)'\n", filename);
+    fprintf(gpf, "plot \\\n");
+    fprintf(gpf, "  '%s' w l title 'FFT=%d,  int=%ds',\\\n", specfile, fft_points, integration_time);
+    fprintf(gpf, "  '%s' w l title 'Moving Avg (%d pts)'\n", avgfile, moving_avg_points);
+    fclose(gpf);
 
-    char epsname[MAX_PATH];
-    snprintf(epsname, sizeof(epsname), "%s.eps", filename);
-    FILE* gplot = popen("gnuplot", "w");
-    if (gplot) {
-        fprintf(gplot, "set terminal postscript eps enhanced color\n");
-        fprintf(gplot, "set output '%s'\n", epsname);
-        fprintf(gplot, "set xlabel 'Frequency (MHz)'\n");
-        fprintf(gplot, "set ylabel 'Power'\n");
-        fprintf(gplot, "set xrange [0:511]\n");
-        fprintf(gplot, "set yrange [0:]\n");
-        fprintf(gplot, "set title 'Power Spectrum'\n");
-        fprintf(gplot, "plot '%s' using 1:2 title 'Spectrum'\n", datname);
-        pclose(gplot);
-    } else {
-        fprintf(stderr, "Failed to run gnuplot\n");
-    }
+    // gnuplot同時起動
+    FILE *gp = popen("gnuplot", "w");
+    fprintf(gp, "set terminal png size 1200,800\n");
+    fprintf(gp, "set output '%s'\n", pngfile);
+    fprintf(gp, "load '%s'\n", scriptfile);
+    pclose(gp);
 
-    free(power_spectrum);
-    fftwf_destroy_plan(plan);
-    fftwf_free(in);
-    fftwf_free(out);
-    free(wordbuf);
-    fclose(f);
-    return 0;
+    fftw_destroy_plan(plan);
+    fftw_free(input);
+    fftw_free(output);
+    free(spectrum);
+    free(buffer);
+    fclose(fp);
+    
+    printf("Make %s\n", pngfile);
+    printf("     %s\n", scriptfile);
+    printf("     %s\n", specfile);
+    printf("     %s\n", avgfile);
+
+    return EXIT_SUCCESS;
 }
 
